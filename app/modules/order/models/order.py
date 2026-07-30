@@ -4,6 +4,7 @@ from sqlalchemy import Integer, Enum, ForeignKey
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 
 from app.core.utils.base_model import BaseModel
+from app.modules.order.models.order_item import OrderItem
 
 __all__ = ["Order", "OrderStatus"]
 

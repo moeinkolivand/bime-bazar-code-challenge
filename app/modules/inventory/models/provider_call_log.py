@@ -4,6 +4,7 @@ from sqlalchemy import String, Integer, Enum, ForeignKey, DateTime, JSON, Float
 from sqlalchemy.orm import mapped_column, Mapped, relationship
 
 from app.core.utils.base_model import BaseModel
+from app.modules.inventory.models.inventory_provider import InventoryProvider
 
 __all__ = ["ProviderCallLog", "ProviderCallType", "ProviderCallOutcome"]
 
@@ -47,4 +48,3 @@ class ProviderCallLog(BaseModel):
     attempted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     provider: Mapped["InventoryProvider"] = relationship()
-    reservation_item: Mapped["ReservationItem | None"] = relationship()
