@@ -11,7 +11,7 @@ from app.core.conf.config import settings
 
 class JwtService:
     def __init__(
-            self,
+        self,
     ):
         self.secret_key = settings.JWT_SECRET_KEY
         self.algorithm = "HS256"
@@ -52,3 +52,7 @@ class JwtService:
 
         except InvalidTokenError:
             raise ValueError("Invalid token")
+
+
+def get_jwt_service() -> JwtService:
+    return JwtService()
