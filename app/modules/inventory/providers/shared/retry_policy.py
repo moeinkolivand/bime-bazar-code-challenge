@@ -23,4 +23,4 @@ class RetryPolicy:
                 if not e.is_timeout:
                     raise
                 time.sleep(self.base_delay * (2**attempt))
-        return last_error
+        raise last_error
