@@ -1,10 +1,6 @@
-class ProviderRequestError(Exception):
-    """Raised by transports (REST/SOAP/gRPC) on network failure, timeout, or non-2xx response."""
+from app.modules.inventory.exceptions.provider_request_error import ProviderRequestError
 
-    def __init__(self, message: str, is_timeout: bool = False):
-        self.message = message
-        self.is_timeout = is_timeout
-        super().__init__(message)
+__all__ = ["ProviderRequestError", "UnknownProviderKeyError", "ProviderMisconfiguredError"]
 
 
 class UnknownProviderKeyError(Exception):

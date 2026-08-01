@@ -1,17 +1,11 @@
 import httpx
 
 from app.modules.inventory.dtoes.dtos import ProviderResponse, RequestSpec
+from app.modules.inventory.exceptions.provider_request_error import ProviderRequestError
 from app.modules.inventory.providers.interfaces.request_manager import (
     IGetRequest,
     IPostRequest,
 )
-
-
-class ProviderRequestError(Exception):
-    def __init__(self, message: str, is_timeout: bool = False):
-        self.message = message
-        self.is_timeout = is_timeout
-        super().__init__(message)
 
 
 class RestTransport(IGetRequest, IPostRequest):
