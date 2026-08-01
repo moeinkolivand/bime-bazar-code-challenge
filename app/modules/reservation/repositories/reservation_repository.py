@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from fastapi import Depends
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session, SessionTransaction
 from app.core.database import get_db_postgres
 from app.modules.reservation.models.reservation import Reservation, ReservationStatus
@@ -94,23 +94,55 @@ class ReservationRepository:
     def get_item_by_id(self, item_id: int):
         return self.db.query(ReservationItem).filter_by(id=item_id).first()
 
-    def update_status_with_version(
+    def get_locked(self, reservation_id: int) -> Reservation | None:
+        """
+        Acquire an exclusive row-level lock (SELECT ... FOR UPDATE) on the reservation.
+
+        Blocks any other transaction from acquiring a lock on (or committing a
+        write to) the same row until this transaction commits or rolls back.
+        Must be called within an active transaction. Returns None if the row
+        does not exist.
+        """
+        stmt = (
+            select(Reservation)
+            .where(Reservation.id == reservation_id)
+            .with_for_update()
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def lock_and_transition(
         self,
         reservation_id: int,
-        current_version: int,
+        allowed_statuses: tuple[ReservationStatus, ...],
         new_status: ReservationStatus,
         **extra_fields,
-    ) -> bool:
-        values = {"status": new_status, "version": current_version + 1, **extra_fields}
-        stmt = (
-            update(Reservation)
-            .where(
-                Reservation.id == reservation_id, Reservation.version == current_version
-            )
-            .values(**values)
-        )
-        result = self.db.execute(stmt)
-        return result.rowcount == 1
+    ) -> Reservation | None:
+        """
+        Acquires a SELECT ... FOR UPDATE row lock on the reservation (blocking
+        any other transaction attempting to lock or transition the same row
+        concurrently). Once the lock is held, checks that the reservation is
+        still in one of `allowed_statuses` — if a concurrent transaction beat
+        us to it, committed, and released the lock before we acquired it, the
+        status will have already moved on and this check catches that instead
+        of blindly overwriting it.
+
+        Returns the locked, updated Reservation on success, or None if the row
+        doesn't exist or is no longer in an allowed status. `version` is still
+        incremented as an audit counter, but it is the row lock — not a
+        WHERE-clause version comparison — that actually prevents concurrent
+        writers from interleaving here.
+        """
+        reservation = self.get_locked(reservation_id)
+        if reservation is None:
+            return None
+        if reservation.status not in allowed_statuses:
+            return None
+        reservation.status = new_status
+        reservation.version += 1
+        for field, value in extra_fields.items():
+            setattr(reservation, field, value)
+        self.db.flush()
+        return reservation
 
     def find_expired_and_lock(self) -> list[Reservation]:
         now = datetime.now()

@@ -1,5 +1,5 @@
 from fastapi import Depends
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db_postgres
@@ -51,36 +51,36 @@ class InventoryRepository:
         """
         Return reserved quantity back to available.
 
-        Atomic UPDATE — safe under concurrency.
+        Pessimistic locking: acquires a SELECT ... FOR UPDATE row lock via
+        get_locked() first, then mutates the in-memory object. The row lock —
+        not a WHERE-clause version check — is what guarantees no concurrent
+        writer can interleave with this read-modify-write.
         Caller must guarantee idempotency (don't call twice for same reservation).
+        Silently no-ops if the row no longer exists, matching the previous
+        atomic-UPDATE behavior (0 rows affected).
         """
-        stmt = (
-            update(ProductInventory)
-            .where(ProductInventory.id == product_inventory_id)
-            .values(
-                qty_available=ProductInventory.qty_available + quantity,
-                qty_reserved=ProductInventory.qty_reserved - quantity,
-                version=ProductInventory.version + 1,
-            )
-        )
-        self.db.execute(stmt)
+        inventory = self.get_locked(product_inventory_id)
+        if inventory is None:
+            return
+        inventory.qty_available += quantity
+        inventory.qty_reserved -= quantity
+        inventory.version += 1
 
     def consume_hold(self, product_inventory_id: int, quantity: int) -> None:
         """
         Permanently consume reserved stock (confirmation).
 
+        Pessimistic locking: acquires a SELECT ... FOR UPDATE row lock via
+        get_locked() first, then mutates the in-memory object in place.
         Removes from reserved without restoring to available.
-        Atomic UPDATE — safe under concurrency.
+        Silently no-ops if the row no longer exists, matching the previous
+        atomic-UPDATE behavior (0 rows affected).
         """
-        stmt = (
-            update(ProductInventory)
-            .where(ProductInventory.id == product_inventory_id)
-            .values(
-                qty_reserved=ProductInventory.qty_reserved - quantity,
-                version=ProductInventory.version + 1,
-            )
-        )
-        self.db.execute(stmt)
+        inventory = self.get_locked(product_inventory_id)
+        if inventory is None:
+            return
+        inventory.qty_reserved -= quantity
+        inventory.version += 1
 
 
 def get_inventory_repository(

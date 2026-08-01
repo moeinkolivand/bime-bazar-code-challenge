@@ -137,10 +137,16 @@ class ReservationService:
         ):
             raise ReservationNotPendingError(reservation_id)
 
-        locked = self.reservation_repo.update_status_with_version(
-            reservation.id, reservation.version, ReservationStatus.CONFIRMING
+        reservation = self.reservation_repo.lock_and_transition(
+            reservation_id,
+            (
+                ReservationStatus.PENDING,
+                ReservationStatus.PENDING_LOCAL,
+                ReservationStatus.CONFIRMING,
+            ),
+            ReservationStatus.CONFIRMING,
         )
-        if not locked:
+        if reservation is None:
             raise ReservationConcurrencyConflictError(reservation_id)
         self.reservation_repo.commit()
         self.reservation_repo.db.refresh(reservation)
@@ -195,15 +201,14 @@ class ReservationService:
                 self.reservation_repo.flush()
 
         with self.reservation_repo.transaction():
-            reservation = self.reservation_repo.get_by_id(reservation_id)
             extra = {"confirmed_at": datetime.now()} if all_confirmed else {}
-            success = self.reservation_repo.update_status_with_version(
-                reservation.id,
-                reservation.version,
+            reservation = self.reservation_repo.lock_and_transition(
+                reservation_id,
+                (ReservationStatus.CONFIRMING,),
                 ReservationStatus.CONFIRMED,
                 **extra,
             )
-            if not success:
+            if reservation is None:
                 raise ReservationConcurrencyConflictError(reservation_id)
 
         if not all_confirmed:
@@ -245,17 +250,15 @@ class ReservationService:
 
             item.status = ReservationItemStatus.RELEASED
 
-        success = self.reservation_repo.update_status_with_version(
-            reservation.id,
-            reservation.version,
+        reservation = self.reservation_repo.lock_and_transition(
+            reservation_id,
+            (ReservationStatus.PENDING, ReservationStatus.PENDING_LOCAL),
             ReservationStatus.CANCELLED,
             cancelled_at=datetime.now(),
         )
-        if not success:
+        if reservation is None:
             raise ReservationConcurrencyConflictError(reservation_id)
 
-        reservation.status = ReservationStatus.CANCELLED
-        reservation.cancelled_at = datetime.now()
         self.reservation_repo.flush()
         return reservation
 
@@ -283,14 +286,13 @@ class ReservationService:
                 finally:
                     item.status = ReservationItemStatus.RELEASED
 
-            success = self.reservation_repo.update_status_with_version(
+            updated = self.reservation_repo.lock_and_transition(
                 reservation.id,
-                reservation.version,
+                (ReservationStatus.PENDING, ReservationStatus.PENDING_LOCAL),
                 ReservationStatus.EXPIRED,
             )
-            if success:
-                reservation.status = ReservationStatus.EXPIRED
-                processed.append(reservation)
+            if updated is not None:
+                processed.append(updated)
 
         self.reservation_repo.flush()
         self.reservation_repo.commit()
