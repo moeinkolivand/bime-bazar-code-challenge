@@ -4,6 +4,10 @@ from app.modules.inventory.dependecies import get_provider_service
 from app.modules.inventory.repositories.inventory_repository import InventoryRepository, get_inventory_repository
 from app.modules.inventory.services.provider_service import ProviderService
 from app.modules.inventory.adapters.reservation_inventory_adapter import ReservationInventoryAdapter
+from app.modules.order.public_api.order_reservation_public_api import ReservationPort
+from app.modules.order.repositories.order_repository import OrderRepository, get_order_repository
+from app.modules.order.services.order_service import OrderService
+from app.modules.reservation.adapters.order_reservation_adapter import OrderReservationAdapter
 from app.modules.reservation.public_api.public_inventory_api_interface import InventoryPublicApiInterface
 from app.modules.reservation.repositories.reservation_repository import ReservationRepository, get_reservation_repository
 from app.modules.reservation.services.reservation_items_service import ReservationItemReserver
@@ -32,3 +36,16 @@ def get_reservation_service(
     config: Settings = Depends(get_settings),
 ) -> ReservationService:
     return ReservationService(reservation_repo, inventory_port, item_reserver, config.RESERVATION_TTL_SECONDS)
+
+
+def get_reservation_port_for_order(
+    reservation_repo: ReservationRepository = Depends(get_reservation_repository),
+) -> ReservationPort:
+    return OrderReservationAdapter(reservation_repo)
+
+
+def get_order_service(
+    order_repo: OrderRepository = Depends(get_order_repository),
+    reservation_port: ReservationPort = Depends(get_reservation_port_for_order),
+) -> OrderService:
+    return OrderService(order_repo, reservation_port)
