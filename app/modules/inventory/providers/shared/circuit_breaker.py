@@ -37,9 +37,9 @@ class CircuitBreaker:
             self._failure_count = 0
             self._state = CircuitState.CLOSED
             return result
-        except ProviderRequestError:
+        except ProviderRequestError as e:
             self._failure_count += 1
             if self._failure_count >= self.failure_threshold:
                 self._state = CircuitState.OPEN
                 self._opened_at = time.time()
-            raise ProviderRequestError
+            raise e
