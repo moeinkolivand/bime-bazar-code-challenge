@@ -45,7 +45,7 @@ class UserService:
         otp_code: Optional[str] = self.otp_service.get_otp(otp_data.phone_number)
         if otp_code is None:
             raise OtpExpiredError()
-        if not self.otp_service.verify_otp(otp_data.phone_number, otp_code):
+        if not self.otp_service.verify_otp(otp_data.phone_number, otp_data.otp_code):
             raise InvalidOtpError()
         jwt_token = self.jwt_service.generate_access_token(user.id)
         return UserVerficationResponseDto(access_token=jwt_token)
