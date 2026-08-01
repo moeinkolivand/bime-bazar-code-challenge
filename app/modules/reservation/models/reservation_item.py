@@ -6,12 +6,12 @@ from app.core.utils.base_model import BaseModel
 __all__ = ["ReservationItem", "ReservationItemStatus"]
 
 
-class ReservationItemStatus(str, enum.Enum):
-    PENDING = "pending"
-    HELD = "held"
-    FAILED = "failed"
-    RELEASED = "released"
-    CONFIRMED = "confirmed"
+class ReservationItemStatus(enum.Enum):
+    HELD_LOCAL = "HELD_LOCAL"  # local stock reserved, not yet upstream
+    HELD = "HELD"  # both local + upstream hold succeeded
+    FAILED = "FAILED"  # reservation attempt failed for this item
+    CONFIRMED = "CONFIRMED"  # payment confirmed, stock consumed
+    RELEASED = "RELEASED"  # hold returned to available
 
 
 class ReservationItem(BaseModel):
@@ -19,7 +19,7 @@ class ReservationItem(BaseModel):
     reservation_id: Mapped[int] = mapped_column(
         ForeignKey("reservations.id"), nullable=False
     )
-    product_id: Mapped[int] = mapped_column(
+    product_inventory_id: Mapped[int] = mapped_column(
         ForeignKey("product_inventories.id"), nullable=False
     )
     sku: Mapped[str] = mapped_column(String, nullable=False)
@@ -27,7 +27,7 @@ class ReservationItem(BaseModel):
     status: Mapped[ReservationItemStatus] = mapped_column(
         Enum(ReservationItemStatus),
         nullable=False,
-        default=ReservationItemStatus.PENDING,
+        default=ReservationItemStatus.HELD_LOCAL,
     )
     provider_reservation_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     reservation: Mapped["Reservation"] = relationship(back_populates="items")
