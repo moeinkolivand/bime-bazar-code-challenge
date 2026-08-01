@@ -67,13 +67,13 @@ class ReservationConfirmationIncompleteError(ReservationServiceError):
         )
 
 
-class InventoryNotFoundError(Exception):
+class InventoryNotFoundError(ReservationServiceError):
     def __init__(self, product_inventory_id: int):
         self.product_inventory_id = product_inventory_id
         super().__init__(f"Inventory row not found for id={product_inventory_id}")
 
 
-class InventoryInsufficientStockError(Exception):
+class InventoryInsufficientStockError(ReservationServiceError):
     def __init__(self, product_inventory_id: int, requested: int, available: int):
         self.product_inventory_id = product_inventory_id
         self.requested = requested
@@ -84,7 +84,7 @@ class InventoryInsufficientStockError(Exception):
         )
 
 
-class ReservationIdempotencyConflictError(Exception):
+class ReservationIdempotencyConflictError(ReservationServiceError):
     """
     Raised when a request with an idempotency key is retried but the original
     reservation is in a terminal or conflicting state, or when the requested
@@ -100,14 +100,14 @@ class ReservationIdempotencyConflictError(Exception):
         )
 
 
-class ReservationConcurrencyConflictError(Exception):
+class ReservationConcurrencyConflictError(ReservationServiceError):
     def __init__(self, reservation_id: int):
         self.reservation_id = reservation_id
         super().__init__(
             f"Reservation {reservation_id} was modified concurrently. Please retry."
         )
 
-class ReservationItemLocalHoldFailed(Exception):
+class ReservationItemLocalHoldFailed(ReservationServiceError):
     """
     Raised when the local (in-DB) stock hold for a single reservation item
     could not be acquired — either because the optimistic version-guarded
