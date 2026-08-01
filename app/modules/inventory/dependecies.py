@@ -1,8 +1,10 @@
+from functools import lru_cache
 from fastapi import Depends
 from app.modules.inventory.providers.provider_registry import ProviderRegistry
 from app.modules.inventory.services.provider_service import ProviderService
 
 
+@lru_cache(maxsize=1)
 def get_provider_registry() -> ProviderRegistry:
     return ProviderRegistry()
 
