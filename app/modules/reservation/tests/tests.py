@@ -439,7 +439,7 @@ class TestConfirmReservation:
         reservation = make_reservation(status=ReservationStatus.PENDING, items=[item])
         mock_reservation_repo.get_by_id.return_value = reservation
         mock_reservation_repo.get_item_by_id.return_value = item
-        mock_reservation_repo.update_status_with_version.return_value = True
+        mock_reservation_repo.lock_and_transition.return_value = reservation
         mock_inventory_port.confirm_upstream.return_value = True
 
         result = reservation_service.confirm_reservation(reservation.id)
@@ -469,7 +469,7 @@ class TestConfirmReservation:
         )
 
         mock_reservation_repo.get_by_id.return_value = reservation
-        mock_reservation_repo.update_status_with_version.return_value = True
+        mock_reservation_repo.lock_and_transition.return_value = reservation
 
         def get_item_side_effect(item_id):
             return {1: item_ok, 2: item_fail}[item_id]
@@ -489,7 +489,7 @@ class TestConfirmReservation:
 
         final_status_calls = [
             c
-            for c in mock_reservation_repo.update_status_with_version.call_args_list
+            for c in mock_reservation_repo.lock_and_transition.call_args_list
             if c.args[2] == ReservationStatus.CONFIRMED
         ]
         assert (
@@ -510,7 +510,7 @@ class TestConfirmReservation:
 
         mock_reservation_repo.get_by_id.return_value = reservation
         mock_reservation_repo.get_item_by_id.return_value = item
-        mock_reservation_repo.update_status_with_version.return_value = True
+        mock_reservation_repo.lock_and_transition.return_value = reservation
         mock_inventory_port.revalidate_stock.return_value = False
 
         with pytest.raises(ReservationConfirmationIncompleteError):
@@ -534,12 +534,25 @@ class TestCancelReservation:
         reservation = make_reservation(status=ReservationStatus.PENDING, items=[item])
         mock_reservation_repo.get_by_id.return_value = reservation
 
-        reservation_service.cancel_reservation(reservation.id)
+        def lock_and_transition_side_effect(
+            reservation_id, allowed_statuses, new_status, **extra_fields
+        ):
+            reservation.status = new_status
+            reservation.cancelled_at = extra_fields.get("cancelled_at")
+            return reservation
+
+        mock_reservation_repo.lock_and_transition.side_effect = (
+            lock_and_transition_side_effect
+        )
+
+        result = reservation_service.cancel_reservation(reservation.id)
 
         mock_inventory_port.release_stock.assert_called_once_with(7, 3)
         mock_inventory_port.release_upstream.assert_called_once_with(7, "ref-1")
         assert item.status == ReservationItemStatus.RELEASED
-        assert reservation.status == ReservationStatus.CANCELLED
+        assert (
+            result.status == ReservationStatus.CANCELLED
+        )  # Check returned reservation
 
     def test_skips_items_not_held(
         self, reservation_service, mock_reservation_repo, mock_inventory_port
@@ -564,12 +577,21 @@ class TestConfirmReservationVersionConflict:
     ):
         reservation = make_reservation(status=ReservationStatus.PENDING, version=5)
         mock_reservation_repo.get_by_id.return_value = reservation
-        mock_reservation_repo.update_status_with_version.return_value = False
+
+        def lock_and_transition_side_effect(
+            reservation_id, allowed_statuses, new_status, **extra_fields
+        ):
+            if new_status == ReservationStatus.CONFIRMING:
+                reservation.status = new_status
+                return reservation
+            return None
+
+        mock_reservation_repo.lock_and_transition.side_effect = (
+            lock_and_transition_side_effect
+        )
 
         with pytest.raises(ReservationConcurrencyConflictError):
             reservation_service.confirm_reservation(reservation.id)
-
-        mock_reservation_repo.get_item_by_id.assert_not_called()
 
 
 class TestCancelReservationEdgeCases:
@@ -587,7 +609,8 @@ class TestCancelReservationEdgeCases:
     ):
         reservation = make_reservation(status=ReservationStatus.PENDING, version=3)
         mock_reservation_repo.get_by_id.return_value = reservation
-        mock_reservation_repo.update_status_with_version.return_value = False
+
+        mock_reservation_repo.lock_and_transition.return_value = None
 
         with pytest.raises(ReservationConcurrencyConflictError):
             reservation_service.cancel_reservation(reservation.id)
@@ -704,7 +727,7 @@ class TestConfirmReservationPartialConfirmation:
             status=ReservationStatus.PENDING, items=[item_ok, item_fail]
         )
         mock_reservation_repo.get_by_id.return_value = reservation
-        mock_reservation_repo.update_status_with_version.return_value = True
+        mock_reservation_repo.lock_and_transition.return_value = reservation
 
         def get_item_by_id_side_effect(item_id):
             return {1: item_ok, 2: item_fail}[item_id]
@@ -721,7 +744,7 @@ class TestConfirmReservationPartialConfirmation:
 
         final_update_calls = [
             c
-            for c in mock_reservation_repo.update_status_with_version.call_args_list
+            for c in mock_reservation_repo.lock_and_transition.call_args_list
             if c.args[2] == ReservationStatus.CONFIRMED
         ]
         assert (
@@ -742,15 +765,24 @@ class TestExpireReservations:
         )
         reservation = make_reservation(status=ReservationStatus.PENDING, items=[item])
         mock_reservation_repo.find_expired_and_lock.return_value = [reservation]
-        mock_reservation_repo.update_status_with_version.return_value = True
+
+        def lock_and_transition_side_effect(
+            reservation_id, allowed_statuses, new_status, **extra_fields
+        ):
+            reservation.status = new_status
+            return reservation
+
+        mock_reservation_repo.lock_and_transition.side_effect = (
+            lock_and_transition_side_effect
+        )
 
         result = reservation_service.expire_reservations()
 
         mock_inventory_port.release_stock.assert_called_once_with(9, 2)
         mock_inventory_port.release_upstream.assert_called_once_with(9, "ref-1")
         assert item.status == ReservationItemStatus.RELEASED
+        assert result[0].status == ReservationStatus.EXPIRED
         assert reservation.status == ReservationStatus.EXPIRED
-        assert result == [reservation]
 
     def test_no_expired_reservations_is_a_noop(
         self, reservation_service, mock_reservation_repo, mock_inventory_port
@@ -765,14 +797,13 @@ class TestExpireReservations:
     def test_version_conflict_during_expiry_skips_that_reservation(
         self, reservation_service, mock_reservation_repo, mock_inventory_port
     ):
-        """If a user confirms/cancels concurrently while the sweep runs,
-        the version check should lose gracefully — not crash the sweep."""
         item = make_item(
             id_=1, status=ReservationItemStatus.HELD, product_inventory_id=1, quantity=1
         )
         reservation = make_reservation(status=ReservationStatus.PENDING, items=[item])
         mock_reservation_repo.find_expired_and_lock.return_value = [reservation]
-        mock_reservation_repo.update_status_with_version.return_value = False
+
+        mock_reservation_repo.lock_and_transition.return_value = None
 
         result = reservation_service.expire_reservations()
 
@@ -782,6 +813,7 @@ class TestExpireReservations:
     def test_multiple_expired_reservations_all_processed(
         self, reservation_service, mock_reservation_repo, mock_inventory_port
     ):
+        reservation = make_reservation()
         item1 = make_item(
             id_=1, status=ReservationItemStatus.HELD, product_inventory_id=1, quantity=1
         )
@@ -791,7 +823,7 @@ class TestExpireReservations:
         res1 = make_reservation(id_=1, status=ReservationStatus.PENDING, items=[item1])
         res2 = make_reservation(id_=2, status=ReservationStatus.PENDING, items=[item2])
         mock_reservation_repo.find_expired_and_lock.return_value = [res1, res2]
-        mock_reservation_repo.update_status_with_version.return_value = True
+        mock_reservation_repo.lock_and_transition.return_value = reservation
 
         result = reservation_service.expire_reservations()
 
@@ -857,51 +889,54 @@ class TestCreateReservationIdempotencyRace:
 
 
 class TestConfirmReservationAllItemsFail:
-        def test_all_items_fail_to_confirm_reservation_still_confirmed(
+    def test_all_items_fail_to_confirm_reservation_still_confirmed(
         self, reservation_service, mock_reservation_repo, mock_inventory_port
     ):
-            """When ALL items fail to confirm, the reservation is still marked
-            CONFIRMED because payment has already succeeded. The caller receives
-            an error to handle the failed items manually."""
-            item1 = make_item(
-                id_=1,
-                status=ReservationItemStatus.HELD,
-                provider_reservation_ref="ref-1",
-                sku="A",
-            )
-            item2 = make_item(
-                id_=2,
-                status=ReservationItemStatus.HELD,
-                provider_reservation_ref="ref-2",
-                sku="B",
-            )
-            reservation = make_reservation(
-                status=ReservationStatus.PENDING, items=[item1, item2]
-            )
+        """When ALL items fail to confirm, the reservation is still marked
+        CONFIRMED because payment has already succeeded. The caller receives
+        an error to handle the failed items manually."""
+        item1 = make_item(
+            id_=1,
+            status=ReservationItemStatus.HELD,
+            provider_reservation_ref="ref-1",
+            sku="A",
+        )
+        item2 = make_item(
+            id_=2,
+            status=ReservationItemStatus.HELD,
+            provider_reservation_ref="ref-2",
+            sku="B",
+        )
+        reservation = make_reservation(
+            status=ReservationStatus.PENDING, items=[item1, item2]
+        )
 
-            mock_reservation_repo.get_by_id.return_value = reservation
-            mock_reservation_repo.update_status_with_version.return_value = True
+        mock_reservation_repo.get_by_id.return_value = reservation
+        mock_reservation_repo.lock_and_transition.return_value = reservation
 
-            def get_item_side_effect(item_id):
-                return {1: item1, 2: item2}[item_id]
+        def get_item_side_effect(item_id):
+            return {1: item1, 2: item2}[item_id]
 
-            mock_reservation_repo.get_item_by_id.side_effect = get_item_side_effect
-            mock_inventory_port.confirm_upstream.return_value = False
+        mock_reservation_repo.get_item_by_id.side_effect = get_item_side_effect
+        mock_inventory_port.confirm_upstream.return_value = False
 
-            with pytest.raises(ReservationConfirmationIncompleteError):
-                reservation_service.confirm_reservation(reservation.id)
+        with pytest.raises(ReservationConfirmationIncompleteError):
+            reservation_service.confirm_reservation(reservation.id)
 
-            assert item1.status != ReservationItemStatus.CONFIRMED
-            assert item2.status != ReservationItemStatus.CONFIRMED
-            assert item1.status == ReservationItemStatus.HELD
-            assert item2.status == ReservationItemStatus.HELD
+        assert item1.status != ReservationItemStatus.CONFIRMED
+        assert item2.status != ReservationItemStatus.CONFIRMED
+        assert item1.status == ReservationItemStatus.HELD
+        assert item2.status == ReservationItemStatus.HELD
 
-            final_calls = [
-                c
-                for c in mock_reservation_repo.update_status_with_version.call_args_list
-                if c.args[2] == ReservationStatus.CONFIRMED
-            ]
-            assert len(final_calls) == 1, "Reservation must be CONFIRMED even when all items fail"
+        final_calls = [
+            c
+            for c in mock_reservation_repo.lock_and_transition.call_args_list
+            if c.args[2] == ReservationStatus.CONFIRMED
+        ]
+        assert (
+            len(final_calls) == 1
+        ), "Reservation must be CONFIRMED even when all items fail"
+
 
 class TestReservationItemRequestValidation:
     def test_zero_quantity_rejected(self):
