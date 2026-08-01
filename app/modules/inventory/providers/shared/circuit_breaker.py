@@ -1,4 +1,3 @@
-    
 import time
 import enum
 from typing import Callable, TypeVar
@@ -43,4 +42,4 @@ class CircuitBreaker:
             if self._failure_count >= self.failure_threshold:
                 self._state = CircuitState.OPEN
                 self._opened_at = time.time()
-            raise
+            raise ProviderRequestError
