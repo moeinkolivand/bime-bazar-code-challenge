@@ -12,16 +12,15 @@ class InventoryRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_for_update_check(self, product_inventory_id: int) -> ProductInventory | None:
-        """Plain read — used to fetch the row's current version before an optimistic hold."""
-        stmt = select(ProductInventory).where(ProductInventory.id == product_inventory_id)
-        return self.db.execute(stmt).scalar_one_or_none()
-
     def get_locked(self, product_inventory_id: int) -> ProductInventory | None:
         """
-        Pessimistic row lock (SELECT ... FOR UPDATE). Used for internal-provider
-        stock, where contention is expected to be highest and we own the row
-        exclusively — blocks concurrent transactions until this one commits.
+        Acquire an exclusive row-level lock (SELECT ... FOR UPDATE).
+
+        Blocks other transactions from locking the same row until
+        this transaction commits or rolls back.
+
+        Must be called within an active transaction.
+        Returns None if the row does not exist.
         """
         stmt = (
             select(ProductInventory)
@@ -30,41 +29,31 @@ class InventoryRepository:
         )
         return self.db.execute(stmt).scalar_one_or_none()
 
-
     def hold_locked(self, inventory: ProductInventory, quantity: int) -> bool:
-        """Call only after get_locked() — row is already locked, so a plain check+mutate is safe."""
+        """
+        Move quantity from available to reserved.
+
+        Call ONLY after get_locked() on the same row in the same transaction.
+        The row lock guarantees no concurrent modification.
+
+        Returns False if insufficient stock.
+        """
         if inventory.qty_available < quantity:
             return False
+
         inventory.qty_available -= quantity
         inventory.qty_reserved += quantity
         inventory.version += 1
+
         return True
 
-
-    def try_hold(self, product_inventory_id: int, quantity: int, expected_version: int) -> bool:
-        """
-        Atomically move stock available -> reserved, guarded by version.
-        Returns False if another writer changed the row first (no rows matched).
-        """
-        stmt = (
-            update(ProductInventory)
-            .where(
-                ProductInventory.id == product_inventory_id,
-                ProductInventory.version == expected_version,
-                ProductInventory.qty_available >= quantity,
-            )
-            .values(
-                qty_available=ProductInventory.qty_available - quantity,
-                qty_reserved=ProductInventory.qty_reserved + quantity,
-                version=ProductInventory.version + 1,
-            )
-        )
-        result = self.db.execute(stmt)
-        return result.rowcount == 1
-
-
     def release_hold(self, product_inventory_id: int, quantity: int) -> None:
-        """Undo a hold — reservation failed, expired, or was cancelled."""
+        """
+        Return reserved quantity back to available.
+
+        Atomic UPDATE — safe under concurrency.
+        Caller must guarantee idempotency (don't call twice for same reservation).
+        """
         stmt = (
             update(ProductInventory)
             .where(ProductInventory.id == product_inventory_id)
@@ -77,7 +66,12 @@ class InventoryRepository:
         self.db.execute(stmt)
 
     def consume_hold(self, product_inventory_id: int, quantity: int) -> None:
-        """Confirm: permanently remove from reserved (does not restore qty_available)."""
+        """
+        Permanently consume reserved stock (confirmation).
+
+        Removes from reserved without restoring to available.
+        Atomic UPDATE — safe under concurrency.
+        """
         stmt = (
             update(ProductInventory)
             .where(ProductInventory.id == product_inventory_id)
@@ -89,5 +83,7 @@ class InventoryRepository:
         self.db.execute(stmt)
 
 
-def get_inventory_repository(db: Session = Depends(get_db_postgres)) -> InventoryRepository:
+def get_inventory_repository(
+    db: Session = Depends(get_db_postgres),
+) -> InventoryRepository:
     return InventoryRepository(db)
