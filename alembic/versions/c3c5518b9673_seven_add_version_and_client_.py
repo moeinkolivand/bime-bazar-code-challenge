@@ -51,7 +51,7 @@ def upgrade() -> None:
     op.create_unique_constraint(
         "uq_reservations_client_idempotency_key",
         "reservations",
-        ["client_idempotency_key"],
+        ["client_idempotency_key", "user_id"],
     )
     # ### end Alembic commands ###
 
