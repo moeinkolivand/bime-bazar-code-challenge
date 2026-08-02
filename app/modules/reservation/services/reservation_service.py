@@ -294,6 +294,7 @@ class ReservationService:
             if updated is not None:
                 processed.append(updated)
 
-        self.reservation_repo.flush()
-        self.reservation_repo.commit()
+            self.reservation_repo.flush()
+            self.reservation_repo.commit()
+
         return processed
