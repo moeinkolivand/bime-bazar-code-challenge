@@ -1,16 +1,37 @@
 from fastapi import Depends
-
-from app.modules.inventory.dependecies import get_provider_service
-from app.modules.inventory.repositories.inventory_repository import InventoryRepository, get_inventory_repository
+from sqlalchemy.orm import Session
+from .all_models import *
+from app.modules.inventory.dependecies import (
+    get_provider_registry,
+    get_provider_service,
+)
+from app.modules.inventory.repositories.inventory_repository import (
+    InventoryRepository,
+    get_inventory_repository,
+)
 from app.modules.inventory.services.provider_service import ProviderService
-from app.modules.inventory.adapters.reservation_inventory_adapter import ReservationInventoryAdapter
+from app.modules.inventory.adapters.reservation_inventory_adapter import (
+    ReservationInventoryAdapter,
+)
 from app.modules.order.public_api.order_reservation_public_api import ReservationPort
-from app.modules.order.repositories.order_repository import OrderRepository, get_order_repository
+from app.modules.order.repositories.order_repository import (
+    OrderRepository,
+    get_order_repository,
+)
 from app.modules.order.services.order_service import OrderService
-from app.modules.reservation.adapters.order_reservation_adapter import OrderReservationAdapter
-from app.modules.reservation.public_api.public_inventory_api_interface import InventoryPublicApiInterface
-from app.modules.reservation.repositories.reservation_repository import ReservationRepository, get_reservation_repository
-from app.modules.reservation.services.reservation_items_service import ReservationItemReserver
+from app.modules.reservation.adapters.order_reservation_adapter import (
+    OrderReservationAdapter,
+)
+from app.modules.reservation.public_api.public_inventory_api_interface import (
+    InventoryPublicApiInterface,
+)
+from app.modules.reservation.repositories.reservation_repository import (
+    ReservationRepository,
+    get_reservation_repository,
+)
+from app.modules.reservation.services.reservation_items_service import (
+    ReservationItemReserver,
+)
 from app.modules.reservation.services.reservation_service import ReservationService
 from app.core.conf.config import Settings, get_settings
 
@@ -35,7 +56,9 @@ def get_reservation_service(
     item_reserver: ReservationItemReserver = Depends(get_reservation_item_reserver),
     config: Settings = Depends(get_settings),
 ) -> ReservationService:
-    return ReservationService(reservation_repo, inventory_port, item_reserver, config.RESERVATION_TTL_SECONDS)
+    return ReservationService(
+        reservation_repo, inventory_port, item_reserver, config.RESERVATION_TTL_SECONDS
+    )
 
 
 def get_reservation_port_for_order(
@@ -49,3 +72,17 @@ def get_order_service(
     reservation_port: ReservationPort = Depends(get_reservation_port_for_order),
 ) -> OrderService:
     return OrderService(order_repo, reservation_port)
+
+
+def build_reservation_service(db: Session) -> ReservationService:
+    reservation_repo = ReservationRepository(db)
+    inventory_repo = InventoryRepository(db)
+    provider_service = ProviderService(get_provider_registry())
+    inventory_port = ReservationInventoryAdapter(inventory_repo, provider_service)
+    item_reserver = ReservationItemReserver(reservation_repo, inventory_port)
+    return ReservationService(
+        reservation_repo=reservation_repo,
+        inventory_port=inventory_port,
+        item_reserver=item_reserver,
+        reservation_ttl_seconds=get_settings().RESERVATION_TTL_SECONDS,
+    )
