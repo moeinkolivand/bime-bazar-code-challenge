@@ -98,6 +98,10 @@ Without periodic cleanup:
 - database tables grow continuously
 - queries become slower
 
+**A specific, currently-real version of this:** `find_expired_and_lock` has no `LIMIT` — it locks (`FOR UPDATE SKIP LOCKED`) and returns *every* expired reservation in one query, then `expire_reservations` processes all of them, one by one, within that single worker tick. Under normal conditions (a steady trickle of abandoned carts) this is invisible. It stops being invisible the moment expired volume spikes — the worker being down for a while, a flash sale with high abandonment, or simply reservation volume growing past what one 30-second tick can process. At that point one tick locks a large, unbounded number of inventory rows and holds them for however long it takes to process the whole batch sequentially, which is exactly the kind of long-held-lock event bottleneck #1 (Database Contention) already flags as the most expensive failure mode in this system — except here it's self-inflicted by the maintenance job rather than caused by user traffic.
+
+The fix is straightforward: add a `LIMIT` (e.g. 100–500) to `find_expired_and_lock`, and have `expire_reservations` loop — process one batch, commit, fetch the next batch — until a fetch returns fewer rows than the limit. This bounds both the lock hold time and the worker tick duration regardless of how large the expired backlog gets, at the cost of a few extra round trips when the backlog is large. Not implemented today; worth doing before this job runs against production-scale abandoned-cart volume.
+
 ---
 
 ## 4. Database Growth
@@ -170,6 +174,8 @@ Responsibilities include:
 - cleaning temporary resources
 
 This prevents user requests from performing maintenance work.
+
+The worker itself (currently an in-process thread on each API instance, polling every 30s) should process expired reservations **in bounded batches**, not all at once — see bottleneck #3 above for why an unbounded query becomes a self-inflicted lock storm as expired volume grows. This is a small change (add a `LIMIT` and loop) but matters more than it looks, since it's the difference between a maintenance job that scales flat and one whose worst-case cost grows with the size of the backlog it's supposed to be clearing.
 
 ---
 
@@ -247,6 +253,16 @@ Read replicas can reduce pressure on the primary database while preserving trans
 The current design assumes a single PostgreSQL instance.
 
 As data volume grows:
+
+## Connection Pooling (PgBouncer)
+
+Stage 1 states horizontal API scaling needs "no application-level changes" — that's true for the app code, but it understates a real constraint on the database side. Each app instance opens its own SQLAlchemy pool (`pool_size=5, max_overflow=10` — up to 15 connections per instance). At N=10 instances that's up to 150 possible connections, against Postgres's default `max_connections` of 100; well before that ceiling, contention for connections compounds the contention already discussed in bottleneck #1, because pessimistic locking means a connection is held for the duration of the lock, not released back to the pool the moment a query returns.
+
+PgBouncer, running as a proxy between the app instances and Postgres, multiplexes many app-side connections onto a much smaller number of real backend connections, so adding instances no longer means a proportional increase in real DB connections. **Use transaction-mode pooling, not session or statement mode** — this codebase uses `SAVEPOINT`s (`reservation_repo.transaction()` nested transactions) and multi-statement transactions that must stay on the same backend connection for their duration; transaction mode holds the backend connection for exactly one client transaction (release on commit/rollback) and supports this correctly, where statement-mode pooling would break it.
+
+This becomes relevant specifically at Stage 1 (once you're running more than a couple of instances) — at a single instance, 15 connections is a non-issue and adding PgBouncer ahead of that need is unnecessary operational overhead for no benefit yet.
+
+---
 
 ## Partitioning
 
@@ -395,10 +411,11 @@ The modular boundaries intentionally make future service extraction straightforw
 If traffic increased significantly, components would likely reach their limits in the following order:
 
 1. Database row locking on high-demand inventory — worsened specifically by synchronous provider calls during `confirm_reservation` extending lock hold time (see bottleneck #2)
-2. Slow or unavailable external providers — and, once running multiple instances, the diluted/thundering-herd effect of per-instance circuit breaker state (bottleneck #5) makes this worse before it's fixed
-3. Reservation expiration processing — compounded by the N+1 query pattern on `reservation.items` as expiry volume grows (bottleneck #6)
-4. Database storage and index growth — including `provider_call_logs` once wired in, which will grow proportionally to provider call volume, not just reservation volume
-5. API server CPU and memory
+2. Database connection exhaustion under horizontal scaling — each instance's own connection pool (up to 15 connections) multiplies with instance count against a shared `max_connections` ceiling, and compounds bottleneck #1 since locked rows hold their connection longer; this is a Stage 1 concern, not a distant one, and is what PgBouncer (Database Scaling, above) addresses
+3. Slow or unavailable external providers — and, once running multiple instances, the diluted/thundering-herd effect of per-instance circuit breaker state (bottleneck #5) makes this worse before it's fixed
+4. Reservation expiration processing — compounded by both the N+1 query pattern on `reservation.items` (bottleneck #6) and the unbounded batch size on `find_expired_and_lock` (bottleneck #3) as expiry volume grows; the latter turns "the worker got backed up" into "the worker locks everything at once"
+5. Database storage and index growth — including `provider_call_logs` once wired in, which will grow proportionally to provider call volume, not just reservation volume
+6. API server CPU and memory
 
 Understanding this order helps prioritize optimization efforts where they provide the greatest benefit.
 
