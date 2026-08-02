@@ -295,6 +295,8 @@ The following assumptions were made:
 - Reservation expiration time is configurable.
 - Inventory quantities cannot become negative.
 
+Several domain-level assumptions carry more reasoning than fits in a bullet list, so they're documented in place instead of repeated here — see **Concurrency Strategy** (why pessimistic locking over optimistic), **Confirm Reservation** (why the reservation still moves to `CONFIRMED` on partial item failure), **Idempotency** (why the uniqueness constraint is scoped per-user rather than globally), and **Known Limitations** (the read-only-provider race window and why it's an accepted risk rather than a bug).
+
 ---
 
 # Trade-offs
