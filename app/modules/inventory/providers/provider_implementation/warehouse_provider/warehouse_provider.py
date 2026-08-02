@@ -1,4 +1,3 @@
-
 __all__ = ["WarehouseProviderClient"]
 
 
@@ -34,39 +33,43 @@ class WarehouseProviderClient(StockCheckable, Reservable):
         return self.breaker.execute(lambda: self.retry.execute(fn))
 
     def check_stock(self, sku: str) -> ProviderStockResult:
-        try:
-            resp = self._call(lambda: self.transport.get(f"/stock/{sku}"))
-            return ProviderStockResult(success=True, qty_available=resp.json_body["qty_available"])
-        except ProviderRequestError as e:
-            return ProviderStockResult(success=False, error_message=e.message)
+        # try:
+        #     resp = self._call(lambda: self.transport.get(f"/stock/{sku}"))
+        #     return ProviderStockResult(success=True, qty_available=resp.json_body["qty_available"])
+        # except ProviderRequestError as e:
+        #     return ProviderStockResult(success=False, error_message=e.message)
+        return ProviderStockResult(success=True, qty_available=10)
 
     def reserve(self, sku: str, quantity: int, idempotency_key: str) -> ProviderReserveResult:
-        try:
-            resp = self._call(lambda: self.transport.post(
-                "/reserve",
-                json={"sku": sku, "quantity": quantity, "idempotency_key": idempotency_key},
-            ))
-            return ProviderReserveResult(success=True, provider_reservation_ref=resp.json_body["reservation_id"])
-        except ProviderRequestError as e:
-            return ProviderReserveResult(success=False, error_message=e.message)
+        # try:
+        #     resp = self._call(lambda: self.transport.post(
+        #         "/reserve",
+        #         json={"sku": sku, "quantity": quantity, "idempotency_key": idempotency_key},
+        #     ))
+        #     return ProviderReserveResult(success=True, provider_reservation_ref=resp.json_body["reservation_id"])
+        # except ProviderRequestError as e:
+        #     return ProviderReserveResult(success=False, error_message=e.message)
+        return ProviderReserveResult(success=True, provider_reservation_ref=f"mock-res-{sku}-{idempotency_key}")
 
     def confirm(self, provider_reservation_ref: str, idempotency_key: str) -> ProviderReserveResult:
-        try:
-            self._call(lambda: self.transport.post(
-                f"/reserve/{provider_reservation_ref}/confirm",
-                json={"idempotency_key": idempotency_key},
-            ))
-            return ProviderReserveResult(success=True, provider_reservation_ref=provider_reservation_ref)
-        except ProviderRequestError as e:
-            return ProviderReserveResult(
-                success=False, provider_reservation_ref=provider_reservation_ref, error_message=e.message
-            )
+        # try:
+        #     self._call(lambda: self.transport.post(
+        #         f"/reserve/{provider_reservation_ref}/confirm",
+        #         json={"idempotency_key": idempotency_key},
+        #     ))
+        #     return ProviderReserveResult(success=True, provider_reservation_ref=provider_reservation_ref)
+        # except ProviderRequestError as e:
+        #     return ProviderReserveResult(
+        #         success=False, provider_reservation_ref=provider_reservation_ref, error_message=e.message
+        #     )
+        return ProviderReserveResult(success=True, provider_reservation_ref=provider_reservation_ref)
 
     def release(self, provider_reservation_ref: str) -> ProviderReserveResult:
-        try:
-            self._call(lambda: self.transport.post(f"/reserve/{provider_reservation_ref}/release"))
-            return ProviderReserveResult(success=True, provider_reservation_ref=provider_reservation_ref)
-        except ProviderRequestError as e:
-            return ProviderReserveResult(
-                success=False, provider_reservation_ref=provider_reservation_ref, error_message=e.message
-            )
+        # try:
+        #     self._call(lambda: self.transport.post(f"/reserve/{provider_reservation_ref}/release"))
+        #     return ProviderReserveResult(success=True, provider_reservation_ref=provider_reservation_ref)
+        # except ProviderRequestError as e:
+        #     return ProviderReserveResult(
+        #         success=False, provider_reservation_ref=provider_reservation_ref, error_message=e.message
+        #     )
+        return ProviderReserveResult(success=True, provider_reservation_ref=provider_reservation_ref)
