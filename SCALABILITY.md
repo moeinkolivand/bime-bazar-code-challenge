@@ -82,6 +82,8 @@ Client Response
 
 A provider timeout directly impacts checkout response time.
 
+**A sharper version of this problem shows up in `confirm_reservation` specifically.** Each item is confirmed inside its own savepoint (`reservation_repo.transaction()`), but savepoints don't release the outer transaction's row locks — those are only released when the whole request's DB transaction commits, at the very end of the method. So if a reservation has multiple items, and item 1's `consume_stock` has already acquired a `SELECT ... FOR UPDATE` lock on its inventory row, that lock stays held while item 2's `confirm_upstream` makes a synchronous network call to an external provider (up to several seconds with retries). A slow provider on item *N* extends the DB lock hold time on items *1* through *N-1*, not just its own request latency. Under load, this turns "provider is slow" into "provider is slow **and** it's now blocking unrelated requests waiting on those earlier inventory rows" — this is the concrete mechanism connecting provider latency to database contention (bottleneck #1), not just checkout response time in isolation.
+
 ---
 
 ## 3. Reservation Expiration
@@ -105,9 +107,30 @@ Several tables continuously grow:
 - Reservations
 - Reservation Items
 - Orders
-- Inventory Events (future)
+- Provider Call Logs — the schema and repository (`ProviderCallLogRepository`, `provider_call_logs` table) already exist, but `CallLogger` is not currently wired into the provider clients (`WarehouseProviderClient`, `MarketplaceSellerXProviderClient` call the transport directly). So this table doesn't grow *yet* — but the moment it's wired in (which it should be — see Observability below), it will grow at least as fast as reservations, since every provider call, not just every reservation, produces a row.
 
 Historical reservation data is valuable for auditing but increases storage and query costs over time.
+
+---
+
+## 5. Per-Instance Resilience State
+
+Retry and circuit-breaker logic (`RetryPolicy`, `CircuitBreaker`) are already implemented and, after the recent fix to `get_provider_registry` (caching it via `lru_cache` instead of constructing it per-request), their state now correctly persists for the lifetime of one process.
+
+That fix does not extend to multiple processes. Under Stage 1 horizontal scaling, each app instance gets its **own** cached `ProviderRegistry`, and therefore its own independent `CircuitBreaker` state per provider. Two concrete consequences as instance count grows:
+
+- **Diluted failure detection.** A breaker opens after `failure_threshold` (e.g. 5) consecutive failures *on that instance*. With N instances splitting traffic round-robin, a provider that's failing 100% of the time still takes roughly N× longer to trip circuit-wide than it would on a single instance, because each instance is independently counting from zero.
+- **Thundering-herd re-probing.** When the cooldown window elapses, every instance transitions to `HALF_OPEN` and re-probes independently, at roughly the same time (since they likely opened around the same time). A provider that's recovering slowly gets hit by N simultaneous probes instead of one, which can be enough to knock it back down — defeating the point of the half-open state.
+
+This only matters once you're actually running multiple instances (Stage 1) with a provider under real, sustained failure — at low traffic or single-instance deployments it's a non-issue. The fix, when it's needed, is to move breaker state out of process memory and into something shared — Redis is the natural choice since it's already in this codebase (currently used for OTP storage), and a simple shared counter + TTL-based open/cooldown flag per provider is enough; it doesn't need the full breaker logic to live in Redis, just the state.
+
+**Also worth noting while this code path is fresh:** `CircuitBreaker`'s state mutation isn't behind a lock. FastAPI runs sync route handlers in a thread pool, so two concurrent requests hitting the same provider on the same instance can race on `_failure_count` — this is a narrow, low-severity race (worst case: an undercounted failure, not a crash or an incorrect open/close decision that sticks), but worth a `threading.Lock` around `CircuitBreaker.execute` if this is taken further.
+
+---
+
+## 6. ORM Query Pattern (N+1 risk)
+
+`Reservation.items` is a lazily-loaded relationship. `confirm_reservation`, `cancel_reservation`, and `expire_reservations` all iterate `reservation.items`, which triggers a separate query per reservation the first time `.items` is accessed (an N+1 pattern) unless the initiating query already eager-loaded it. `find_expired_and_lock` in particular processes a batch of reservations in a loop — at low expiry volume this is invisible, but as the platform grows and abandoned-cart volume grows with it, this becomes a query-count multiplier on exactly the code path (Stage 2's background worker) that's supposed to be lightweight, periodic maintenance work. Fix is a one-line `selectinload(Reservation.items)` on the relevant queries in `ReservationRepository` — cheap to do, easy to forget until a profiler catches it.
 
 ---
 
@@ -191,12 +214,13 @@ Benefits:
 
 External providers are inherently unreliable.
 
-Provider operations should include:
+Retry (exponential backoff, timeout-only) and circuit breakers are already implemented per-provider (`RetryPolicy`, `CircuitBreaker`), and — after fixing `get_provider_registry` to be cached rather than reconstructed per-request — their state correctly persists for a single process's lifetime.
 
-- exponential backoff
-- retry limits
-- circuit breakers
-- dead-letter queues
+What's genuinely still missing at this stage:
+
+- **Shared breaker state across instances**, once running more than one app instance — see "Per-Instance Resilience State" above. This is the actual next step, not "add circuit breakers" from scratch.
+- **Wiring `CallLogger` into the provider clients.** It exists and is tested in isolation, but isn't called from `WarehouseProviderClient` or `MarketplaceSellerXProviderClient` today, so no call-level latency/outcome data is actually being recorded yet.
+- **Dead-letter queues** for provider operations that exhaust retries — currently a failed provider call just surfaces as a failed reservation item; there's no queue to replay it later without the customer re-initiating checkout.
 
 This improves availability without affecting local consistency.
 
@@ -306,6 +330,8 @@ Recommended metrics include:
 - timeout rate
 - retry count
 
+The data source for these already exists as scaffolding — `ProviderCallLogRepository` and the `provider_call_logs` table were built for exactly this — it's just not wired into the provider clients yet (see Database Growth / Stage 4 above). Wiring `CallLogger` in is most of the work needed to make this section actionable rather than aspirational; the metrics above are effectively a `GROUP BY provider_id, outcome` query away once that's done.
+
 These metrics allow operational bottlenecks to be identified before they affect users.
 
 ---
@@ -368,10 +394,10 @@ The modular boundaries intentionally make future service extraction straightforw
 
 If traffic increased significantly, components would likely reach their limits in the following order:
 
-1. Database row locking on high-demand inventory
-2. Slow or unavailable external providers
-3. Reservation expiration processing
-4. Database storage and index growth
+1. Database row locking on high-demand inventory — worsened specifically by synchronous provider calls during `confirm_reservation` extending lock hold time (see bottleneck #2)
+2. Slow or unavailable external providers — and, once running multiple instances, the diluted/thundering-herd effect of per-instance circuit breaker state (bottleneck #5) makes this worse before it's fixed
+3. Reservation expiration processing — compounded by the N+1 query pattern on `reservation.items` as expiry volume grows (bottleneck #6)
+4. Database storage and index growth — including `provider_call_logs` once wired in, which will grow proportionally to provider call volume, not just reservation volume
 5. API server CPU and memory
 
 Understanding this order helps prioritize optimization efforts where they provide the greatest benefit.
